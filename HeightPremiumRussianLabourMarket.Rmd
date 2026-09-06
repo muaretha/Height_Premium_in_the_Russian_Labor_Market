@@ -1,0 +1,553 @@
+---
+title: "Is There a Height Premium in the Russian Labour Market?"
+subtitle: Final Project Report — Applied Statistics
+output:
+  word_document:
+    toc: true
+    toc_depth: '3'
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+data: "RLMS-HSE Wave 33, 2024"
+header-includes:
+- \usepackage{float}
+- \floatplacement{figure}{H}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.align  = "center",
+  fig.width  = 7,
+  fig.height = 4
+)
+```
+
+```{r libraries, include=FALSE}
+library(haven)
+library(tidyverse)
+library(knitr)
+library(ggplot2)
+library(scales)
+library(broom)
+```
+
+------------------------------------------------------------------------
+
+# Research Question
+
+## Research Question and Hypothesis
+
+Is there a statistically significant link between an individual's physical height and their monthly income in the Russian labour market, and does this link hold when controlling for gender, age, and level of education?
+
+We test the hypothesis that not only human capital, but also physical characteristics may influence economic success. This question is motivated by an established international literature on the "height premium" — the empirically observed tendency for taller individuals to earn more — and by the absence of similar evidence for the Russian context.
+
+## Target Population and Sampling Method
+
+The study is based on Wave 33 (2024) of the Russian Longitudinal Monitoring Survey — Higher School of Economics (RLMS-HSE), a nationally representative panel survey of Russian households. The RLMS-HSE employs a multistage stratified territorial probability sample: respondents are selected through successive random draws at the levels of regions → settlements → polling station precincts → households. This design is the most appropriate for a nationwide study of Russia: it guarantees representation of both large metropolitan areas and rural communities, which is critical for studying income variability across a geographically heterogeneous country.
+
+## Sampling and Non-Sampling Errors
+
+Two potential sources of bias are relevant to our study:
+
+1.  **Self-reporting error.** Both height and wages are self-reported. Men are known to systematically overestimate their height, while respondents in general — particularly those with informal income — tend to underreport wages. This measurement error introduces noise into the data and may attenuate the estimated height–wage correlation toward zero.
+
+2.  **Non-response bias.** High-income individuals ("the wealthy") are disproportionately likely to decline participation in household surveys. This truncates the upper tail of the wage distribution and may lead to an underestimate of the height premium among the highest earners.
+
+## Key Variables
+
+| Variable | Type | Source | Description |
+|------------------|------------------|------------------|------------------|
+| `wage` | Continuous (dep.) | `ccj10` | Average monthly net wage (RUB) |
+| `height` | Continuous (pred.) | `ccm2` | Respondent's height (cm) |
+| `gender` | Binary | `cch5` | 1 = Male, 2 = Female |
+| `edu` | Ordinal | `cc_diplom` | Highest educational qualification |
+| `status` | Nominal | `status` | Type of settlement |
+| `age` | Continuous | `ccj69_9c` | Age (years), calculated from birth year |
+
+------------------------------------------------------------------------
+
+# Description of the Data
+
+## Database and Data Cleaning
+
+The raw RLMS-HSE Wave 33 dataset contains 12,000 observations. We loaded and cleaned the data as follows.
+
+```{r chapter2_cleaning}
+raw_df <- read_dta("r33i_os_84.dta")
+
+clean_df <- raw_df %>%
+  select(
+    wage       = matches("ccj10$"),
+    height     = matches("ccm2$"),
+    gender     = matches("cch5$"),
+    edu        = matches("cc_diplom$"),
+    status     = matches("status$"),
+    birth_year = matches("ccj69_9c$")
+  ) %>%
+  mutate(across(everything(), ~ifelse(. > 900000, NA, .))) %>%
+  mutate(age = 2024 - birth_year) %>%
+  filter(
+    wage   > 0,
+    age    >= 18 & age <= 72,
+    height > 140 & height < 220
+  ) %>%
+  drop_na() %>%
+  mutate(
+    gender = as_factor(gender),
+    edu    = as_factor(edu),
+    status = as_factor(status)
+  )
+
+rownames(clean_df) <- NULL
+height_premium_data <- clean_df %>% select(-birth_year)
+
+cat("Final sample size:", nrow(height_premium_data), "observations\n")
+cat("Observations removed:", 12000 - nrow(height_premium_data))
+```
+
+## Justification for Exclusions
+
+A total of 7,004 observations (58.4%) were excluded for three reasons:
+
+1.  **Logical filtering.** For our question, it makes sense to examine working-age individuals who receive a salary. Therefore, all retirees, children under 18, and the unemployed were removed. These respondents simply lacked data on our dependent variable (salary).
+
+2.  **Selective response failure** was the next primary reason for excluding respondents from the final sample. The question about current income is sensitive information, and therefore some individuals chose not to answer it. The salary question was the most omitted question in the entire RLMS survey.
+
+3.  **Item non-response on other variables** — among those who answered the salary question, there were those who did not answer the other questions of interest. If we did not have data for all six variables, we also removed that respondent from the dataset. Omissions in simple questions about height, education, etc. could have been due to typing errors or the interviewer accidentally skipping a question. Such omissions were rare.
+
+The final analytical sample of 4,996 observations retains the employed, working-age population (18–72 years) with valid height records (141–219 cm), which is large enough to have statistical power. Despite the removal of a significant portion of observations, our dataset is still representative of questions about the active labor force in Russia, allowing us to qualitatively examine the "height premium" effect.
+
+## Outlier Treatment
+
+```{r chapter2_outliers}
+wage_stats <- height_premium_data %>%
+  summarise(
+    Mean = mean(wage), Median = median(wage),
+    `Std. Dev.` = sd(wage), Min = min(wage), Max = max(wage),
+    Q1 = quantile(wage, 0.25), Q3 = quantile(wage, 0.75),
+    IQR = IQR(wage)
+  )
+
+upper_limit <- wage_stats$Q3 + 1.5 * wage_stats$IQR
+lower_limit <- wage_stats$Q1 - 1.5 * wage_stats$IQR
+
+clean_height_premium_data <- height_premium_data %>%
+  filter(wage >= lower_limit & wage <= upper_limit) %>%
+  mutate(high_edu = ifelse(as.numeric(edu) == 6, 1, 0))
+
+cat("Upper fence (1.5×IQR rule):", upper_limit, "RUB\n")
+cat("Outliers removed:", nrow(height_premium_data) - nrow(clean_height_premium_data))
+```
+
+We applied the 1.5 × IQR rule to the wage variable, which identified 272 observations above 109,500 RUB as outliers. These were removed for the hypothesis testing and regression chapters to prevent extreme values from distorting inference. All descriptive statistics in Chapter 3 are reported on the full sample (N = 4,996) to give an honest picture of the distribution; subsequent analyses use the cleaned dataset (N = 4,724).
+
+------------------------------------------------------------------------
+
+# Descriptive Statistics
+
+## Wage and Height: Summary Statistics
+
+```{r chapter3_tables}
+height_stats <- height_premium_data %>%
+  summarise(
+    Mean = mean(height), Median = median(height),
+    `Std. Dev.` = sd(height), Min = min(height), Max = max(height),
+    Q1 = quantile(height, 0.25), Q3 = quantile(height, 0.75),
+    IQR = IQR(height)
+  )
+
+kable(wage_stats, digits = 0,
+      caption = "Table 3.1. Descriptive statistics of monthly wages (RUB), N = 4,996")
+
+kable(height_stats, digits = 1,
+      caption = "Table 3.2. Descriptive statistics of respondents' height (cm), N = 4,996")
+```
+
+Wage exhibits strong positive skewness: the mean (49,765 RUB) exceeds the median (40,000 RUB) by 25%, and a standard deviation of 35,350 RUB underlines extreme income inequality. Height is, by contrast, near-normally distributed — mean and median are virtually identical (170.1 vs. 170 cm), and the IQR is a compact 12 cm.
+
+## Wage Distributions
+
+**Bin width choice — 10,000 RUB.** The wage variable spans from roughly 2,000 to 465,000 RUB, giving a total range of \~463,000 RUB. With $n = 4{,}996$ observations, Sturges' rule suggests $k \approx 13$ bins, implying a width of \~35,600 RUB. Scott's rule ($h = 3.49 \cdot \hat{\sigma} \cdot n^{-1/3}$) yields \~10,600 RUB using $\hat{\sigma} \approx 35{,}000$ RUB. We selected 10,000 RUB as the nearest round number consistent with Scott's estimate. This width is fine enough to reveal the shape and modality of the distribution without fragmenting it into noisy single-observation spikes, and it aligns naturally with how salaries are discussed and rounded in practice (most respondents report figures in multiples of 5,000–10,000 RUB).
+
+```{r chapter3_wage_hist, fig.cap="Fig. 3.1. Distribution of monthly wages — histogram"}
+ggplot(height_premium_data, aes(x = wage)) +
+  geom_histogram(binwidth = 10000, fill = "pink", color = "brown") +
+  scale_x_continuous(labels = label_number(big.mark = " ")) +
+  labs(title = "Distribution of Monthly Wages",
+       x = "Monthly Wage (RUB)", y = "Frequency") +
+  theme_minimal()
+```
+
+```{r chapter3_wage_box, fig.cap="Fig. 3.2. Distribution of monthly wages — boxplot"}
+ggplot(height_premium_data, aes(x = "", y = wage)) +
+  geom_boxplot(fill = "pink", color = "brown",
+               outlier.color = "red", outlier.shape = 16, outlier.size = 0.8) +
+  scale_y_continuous(labels = label_number(big.mark = " ")) +
+  labs(title = "Wage Distribution — Boxplot",
+       x = "", y = "Monthly Wage (RUB)") +
+  theme_minimal()
+```
+
+```{r chapter3_wage_violin, fig.cap="Fig. 3.3. Distribution of monthly wages — violin plot"}
+ggplot(height_premium_data, aes(x = "Distribution", y = wage)) +
+  geom_violin(fill = "pink", color = "brown", adjust = 3) +
+  geom_boxplot(width = 0.05, fill = "white", outlier.shape = NA) +
+  scale_y_continuous(labels = label_number(big.mark = " ")) +
+  labs(title = "Wage Distribution — Violin Plot",
+       x = "", y = "Monthly Wage (RUB)") +
+  theme_minimal()
+```
+
+All three visualisations confirm the same picture: a concentration of earners in the 20,000–50,000 RUB range and a long right tail of high-income outliers. The 272 points above 109,500 RUB are clearly visible in the boxplot.
+
+## Height Distributions
+
+**Bin width choice — 10 cm.** Height ranges from 141 to 219 cm (range = 78 cm). Sturges' rule gives $k \approx 13$ bins (\~6 cm each), while Scott's rule with $\hat{\sigma} \approx 9$ cm yields $h \approx 5.7$ cm. We rounded up to 10 cm for two reasons: first, it matches the natural granularity of self-reported height (respondents typically round to the nearest 5 or 10 cm); second, bins narrower than \~5 cm would produce a comb-like pattern driven by rounding artefacts rather than the true underlying distribution. A 10 cm bin width produces a clean, smooth bell curve that faithfully represents the biological distribution without artificial noise.
+
+```{r chapter3_height_hist, fig.cap="Fig. 3.4. Distribution of respondent heights — histogram"}
+ggplot(height_premium_data, aes(x = height)) +
+  geom_histogram(binwidth = 5, fill = "lightblue", color = "darkblue") +
+  labs(title = "Distribution of Respondent Heights",
+       x = "Height (cm)", y = "Frequency") +
+  theme_minimal()
+```
+
+```{r chapter3_height_box, fig.cap="Fig. 3.5. Distribution of respondent heights — boxplot"}
+ggplot(height_premium_data, aes(x = "", y = height)) +
+  geom_boxplot(fill = "lightblue", color = "darkblue",
+               outlier.color = "red", outlier.shape = 16, outlier.size = 0.8) +
+  labs(title = "Height Distribution — Boxplot",
+       x = "", y = "Height (cm)") +
+  theme_minimal()
+```
+
+```{r chapter3_height_violin, fig.cap="Fig. 3.6. Distribution of respondent heights — violin plot"}
+ggplot(height_premium_data, aes(x = "Distribution", y = height)) +
+  geom_violin(fill = "lightblue", color = "darkblue", adjust = 3) +
+  geom_boxplot(width = 0.05, fill = "white", outlier.shape = NA) +
+  labs(title = "Height Distribution — Violin Plot",
+       x = "", y = "Height (cm)") +
+  theme_minimal()
+```
+
+Height follows an approximately normal, symmetric distribution centred at 170 cm. The slight bimodality visible in the histogram reflects the pooling of male and female subpopulations.
+
+## Wage by Gender
+
+```{r chapter3_gender_box, fig.cap="Fig. 3.7. Wage distribution by gender (capped at 150,000 RUB)"}
+ggplot(height_premium_data,
+       aes(x     = factor(as.numeric(gender), labels = c("Male", "Female")),
+           y     = wage,
+           fill  = factor(as.numeric(gender)),
+           color = factor(as.numeric(gender)))) +
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 0.8) +
+  scale_fill_manual(values  = c("lightblue", "pink")) +
+  scale_color_manual(values = c("darkblue",  "brown")) +
+  coord_cartesian(ylim = c(0, 150000)) +
+  scale_y_continuous(labels = label_number(big.mark = " ")) +
+  labs(title = "Wage Distribution by Gender (up to 150,000 RUB)",
+       x = "Gender", y = "Monthly Wage (RUB)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+The boxplot reveals an immediately visible wage gap: the male median salary substantially exceeds the female median. This gap is further quantified in Chapter 4.
+
+------------------------------------------------------------------------
+
+# Hypothesis Testing
+
+## Hypothesis 1: Gender Wage Gap (t-test and Confidence Intervals)
+
+Because men are on average both taller and higher-paid, we must first establish whether a statistically significant gender pay gap exists. If it does, gender is a confounder of the height–wage relationship.
+
+$$H_0: \mu_{\text{male}} = \mu_{\text{female}} \qquad H_1: \mu_{\text{male}} \neq \mu_{\text{female}} \qquad \alpha = 0.05$$
+
+```{r chapter4_h1_table}
+male_data   <- height_premium_data %>% filter(as.numeric(gender) == 1)
+female_data <- height_premium_data %>% filter(as.numeric(gender) == 2)
+
+t_male   <- t.test(male_data$wage,   conf.level = 0.95)
+t_female <- t.test(female_data$wage, conf.level = 0.95)
+
+compare_groups <- data.frame(
+  Gender   = c("Male", "Female"),
+  N        = c(nrow(male_data), nrow(female_data)),
+  Mean     = c(t_male$estimate,   t_female$estimate),
+  Lower_CI = c(t_male$conf.int[1], t_female$conf.int[1]),
+  Upper_CI = c(t_male$conf.int[2], t_female$conf.int[2])
+)
+
+kable(compare_groups, digits = 0,
+      caption = "Table 4.1. 95% Confidence Intervals for mean wages by gender",
+      format.args = list(big.mark = " "))
+```
+
+```{r chapter4_h1_plot, fig.cap="Fig. 4.1. 95% Confidence Intervals for wages by gender"}
+ggplot(compare_groups, aes(x = Gender, y = Mean, color = Gender)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = Lower_CI, ymax = Upper_CI),
+                width = 0.2, linewidth = 1) +
+  labs(title    = "95% Confidence Intervals for Wages by Gender",
+       subtitle = "Visual overlap analysis",
+       y        = "Mean Monthly Wage (RUB)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+**Result.** The two confidence intervals do not overlap: the upper bound of the female CI (≈42,000 RUB) lies more than 16,000 RUB below the lower bound of the male CI (≈58,000 RUB). This constitutes strong evidence that the gender wage gap is statistically significant at $\alpha = 0.05$, and is not a sampling artefact — it is a structural feature of the Russian labour market. The median salary for men is approximately 43% higher than for women.
+
+**Implication for the height premium.** Without controlling for gender, any positive height–wage correlation would partly reflect this gender gap (since men are taller on average), inflating the estimated height premium. Gender must therefore be included as a control variable in all subsequent models.
+
+## Hypothesis 2: Settlement Type and Wages (ANOVA)
+
+We examine whether monthly income differs significantly across types of settlement (regional center, city, town/PGT, village). Identifying this geographic effect is essential: if taller individuals are disproportionately concentrated in wealthier urban areas, an unadjusted model would attribute an urban income premium to height. To obtain robust results, we use the cleaned dataset without wage outliers (wage $\leq$ 109,500 RUB). We apply a one-way ANOVA to compare mean wages across settlement types simultaneously.
+
+$$H_0: \mu_{\text{reg. center}} = \mu_{\text{city}} = \mu_{\text{town}} = \mu_{\text{village}} \qquad H_1: \text{at least one } \mu_i \text{ differs} \qquad \alpha = 0.05$$
+
+```{r chapter4_h2}
+anova_result  <- aov(wage ~ status, data = clean_height_premium_data)
+anova_summary <- summary(anova_result)
+print(anova_summary)
+
+status_means <- clean_height_premium_data %>%
+  group_by(status) %>%
+  summarise(n = n(), Mean_Wage = mean(wage), SD_Wage = sd(wage)) %>%
+  mutate(status = case_when(
+    status == 1 ~ "Regional Center",
+    status == 2 ~ "City",
+    status == 3 ~ "Town / PGT",
+    status == 4 ~ "Village"
+  )) %>%
+  arrange(desc(Mean_Wage))
+
+kable(status_means, digits = 0,
+      caption = "Table 4.2. Mean wages by settlement type (cleaned sample, N = 4,724)",
+      format.args = list(big.mark = " "))
+```
+
+**Result.** The ANOVA yields F = 79.98, p \< 2.2e-16. We reject $H_0$: settlement type has a statistically significant effect on wages. A clear urbanization gradient emerges — regional centers lead at \~49,191 RUB, while towns/PGT show the lowest earnings at \~35,565 RUB, a gap of \~14,000 RUB. Settlement type (`status`) must therefore be controlled for in the regression model.
+
+## Hypothesis 3: Gender and Education (Chi-Squared Test)
+
+We assess the relationship between respondent gender and possession of a higher education degree. Understanding this association helps us contextualize the gender wage gap and the distribution of human capital in our sample. To test whether gender and higher education attainment are statistically independent, we perform a chi-squared test.
+
+$$H_0: \text{gender and higher education are independent} \qquad H_1: \text{gender and higher education are associated} \qquad \alpha = 0.05$$
+
+```{r chapter4_h3_test}
+height_premium_data <- height_premium_data %>%
+  mutate(high_edu = ifelse(as.numeric(edu) == 6, 1, 0))
+
+edu_gender_table <- table(height_premium_data$gender,
+                          height_premium_data$high_edu)
+
+edu_gender_prop  <- prop.table(edu_gender_table, margin = 1) * 100
+
+chi_test_res <- chisq.test(edu_gender_table)
+print(chi_test_res)
+
+cat("\nConditional proportions (row %):\n")
+print(round(edu_gender_prop, 1))
+```
+
+```{r chapter4_h3_plot, fig.cap="Fig. 4.2. Education level by gender"}
+ggplot(height_premium_data,
+       aes(x    = factor(gender, labels = c("Male", "Female")),
+           fill = factor(high_edu))) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Education Level by Gender",
+       x     = "Gender",
+       y     = "Percentage",
+       fill  = "High Education (1=Yes)") +
+  theme_minimal()
+```
+
+**Statistical Decision.** With $\chi^2 = 75.598$, $df = 1$, and $p < 2.2 \times 10^{-16}$, we reject $H_0$. Gender and higher education attainment are not independent in our sample.
+
+The conditional proportions reveal a striking disparity:
+
+-   **40.2% of women** in the sample hold a university degree.
+-   **Only 28.4% of men** hold a university degree — a **12-percentage-point gap** in favour of women.
+
+This means that having a university degree is not sufficient to overcome the gender wage gap. Hidden factors — including gender itself and physical height (which is monetized more strongly among men) — may act as implicit labour market signals that sometimes outweigh formal qualifications in the Russian context.
+
+## Hypothesis 4: Height–Wage Correlation (Main Hypothesis)
+
+$$H_0: \rho = 0 \quad \text{(no linear relationship between height and wage)} \qquad H_1: \rho \neq 0 \qquad \alpha = 0.05$$
+
+```{r chapter4_h4_cor}
+main_test <- cor.test(clean_height_premium_data$height,
+                      clean_height_premium_data$wage)
+print(main_test)
+```
+
+**Result.** Pearson's $r = 0.238$, $t = 16.886$, $p < 2.2 \times 10^{-16}$. We reject $H_0$: there is a statistically significant positive correlation between height and monthly wage. The 95% CI for $r$ is [0.211; 0.265] — entirely positive, with zero excluded by a wide margin.
+
+### Subgroup Analysis
+
+```{r chapter4_h4_subgroup}
+model_m <- lm(wage ~ height,
+              data = subset(clean_height_premium_data, as.numeric(gender) == 1))
+model_f <- lm(wage ~ height,
+              data = subset(clean_height_premium_data, as.numeric(gender) == 2))
+
+subgroup <- data.frame(
+  Group                  = c("Aggregate", "Men", "Women"),
+  `Premium (RUB per cm)` = c(
+    round(coef(lm(wage ~ height, data = clean_height_premium_data))["height"], 0),
+    round(coef(model_m)["height"], 0),
+    round(coef(model_f)["height"], 0)
+  ),
+  check.names = FALSE
+)
+
+kable(subgroup, caption = "Table 4.3. Height premium by group (RUB per 1 cm of height)")
+```
+
+The aggregate premium of 579 RUB per cm substantially exceeds the within-group estimates (416 RUB for men, 119 RUB for women). This is a textbook example of confounding by gender: because men are both taller and higher-paid, the pooled model absorbs the gender wage gap and incorrectly attributes it to height. The subgroup result of 416 RUB for men provides a far more accurate estimate of the true height premium.
+
+------------------------------------------------------------------------
+
+# Regression Analysis
+
+## Simple OLS Regression
+
+We chose monthly salary (`wage`) as the quantitative dependent variable ($Y$) and physical height in centimeters (`height`) as the quantitative explanatory variable ($X$). The model takes the following form:
+
+$$\widehat{\text{wage}}_i = \beta_0 + \beta_1 \cdot \text{height}_i + \varepsilon_i$$
+
+```{r chapter5_simple}
+model_simple  <- lm(wage ~ height, data = clean_height_premium_data)
+simple_results <- tidy(model_simple)
+
+kable(simple_results, digits = 3,
+      caption = "Table 5.1. Simple OLS Regression Results (Wage ~ Height)")
+```
+
+```{r chapter5_scatter, fig.cap="Fig. 5.1. Scatterplot of monthly wage vs. height with OLS regression line"}
+ggplot(clean_height_premium_data, aes(x = height, y = wage)) +
+  geom_point(alpha = 0.2, color = "steelblue") +
+  geom_smooth(method = "lm", color = "red", linewidth = 1.2, se = TRUE) +
+  scale_y_continuous(labels = label_number(big.mark = " ")) +
+  labs(title    = "Scatterplot of Monthly Wage vs. Height",
+       subtitle = "Red line represents the OLS regression fit",
+       x = "Height (cm)", y = "Monthly Wage (RUB)") +
+  theme_minimal()
+```
+
+### Interpretation of the Regression Results
+
+-   **Estimate (height = 578.85):** The positive coefficient indicates that, on average, a 1 cm increase in height is associated with a monthly salary increase of 578.85 RUB. The intercept of −54,586 represents the theoretical wage at 0 cm of height and carries no practical economic meaning.
+-   **Std. Error (34.28):** The standard error is small relative to the coefficient itself, indicating a fairly high degree of confidence and accuracy in the estimate.
+-   **t-statistic (16.886):** This value substantially exceeds the critical threshold of 2, providing strong evidence of a statistically significant relationship.
+-   **p-value (\< 2e-16):** Since $p \ll 0.05$, we reject the null hypothesis and confirm that the effect of height on wages is statistically significant.
+
+Based on our OLS model, we answer the research question unambiguously: there is a statistically significant "height premium" in the Russian labor market. This conclusion is fully consistent with the analysis in Chapter 4, where Pearson's correlation test also revealed a strong positive relationship between height and wage.
+
+**Limitation:** Because this is a simple linear regression with only one predictor, the estimated coefficient (578.85 RUB) is substantially overestimated. As established previously, this effect is confounded by the gender wage gap — men are both taller and higher-paid — meaning the height coefficient partly absorbs a gender effect rather than measuring a pure height premium.
+
+### Visual Assessment of the Model Fit
+
+By analyzing the scatterplot with the overlaid OLS regression line, we draw several important conclusions:
+
+1.  **Trend Confirmation:** The red regression line has a positive slope, visually confirming the mathematical finding from Chapter 1 — there is a positive association between height and wages.
+2.  **Poor Visual Fit:** Despite the statistically significant trend, the line fits individual observations very loosely. The point cloud is widely scattered around the regression line across the entire range of heights. At any given height value, wages span from the minimum to over 100,000 RUB.
+3.  **Alignment with** $R^2$: The visual dispersion reflects the low Multiple $R^2 \approx 0.056$ from the regression output. Height explains only 5.6% of the variance in wages — the vast majority of the dispersion remains unpredicted by this model.
+
+**Conclusion:** The regression line accurately captures the macroeconomic trend, but we observe enormous scatter. This two-dimensional model is entirely inadequate for predicting any individual's specific income.
+
+## Multiple OLS Regression
+
+As noted, the simple OLS model suffers from omitted variable bias — height is strongly correlated with gender, which in turn has a substantial impact on wages. To isolate the pure effect of height, we estimate a multiple linear regression controlling for gender, education, and settlement status:
+
+$$\widehat{\text{wage}}_i = \beta_0 + \beta_1\,\text{height}_i + \beta_2\,\text{gender}_i + \beta_3\,\text{high\_edu}_i + \beta_4\,\text{status}_i + \varepsilon_i$$
+
+**Variable selection justification:**
+
+-   `gender` — confirmed confounder (Section 4.1): men are taller and earn more.
+-   `status` — confirmed confounder (Section 4.2): geographic location drives large wage differentials.
+-   `high_edu` — established predictor of wages in human capital theory; also correlated with both height (via nutrition and socioeconomic background) and wages.
+
+```{r chapter5_multi}
+model_multi   <- lm(wage ~ height + gender + high_edu + status,
+                    data = clean_height_premium_data)
+multi_results <- tidy(model_multi)
+
+kable(multi_results, digits = 3,
+      caption = "Table 5.2. Multiple OLS Regression Results (Wage ~ Height + Gender + Education + Status)")
+```
+
+### Interpretation of Coefficients
+
+1.  **Height (162.51 RUB/cm,** $p < 0.001$). Controlling for all confounders, each additional centimetre of height is associated with a 162.51 RUB increase in monthly wages. The premium is 3.6 times smaller than in the simple model (578.85 RUB), confirming that the simple estimate was heavily inflated by gender and geography. Nevertheless, the effect remains statistically significant, providing evidence of a genuine height premium independent of the measured confounders.
+
+2.  **Gender — Female (−11,153 RUB,** $p < 0.001$). Holding height, education, and location constant, women earn approximately 11,153 RUB less per month than men — underscoring the structural gender pay gap.
+
+3.  **Higher education (+9,769 RUB,** $p < 0.001$). A university degree is associated with a 9,769 RUB wage premium — the second largest effect in the model and roughly 60 times the per-centimetre height premium.
+
+4.  **Settlement type.** Relative to regional centers (baseline), living in a city reduces expected wages by −6,185 RUB, in a town/PGT by −11,750 RUB, and in a village by −10,024 RUB — all highly significant and economically large.
+
+------------------------------------------------------------------------
+
+# Critical Discussion of the Results
+
+## Main Conclusions
+
+Our study yields three principal findings:
+
+1.  **The height premium exists and is statistically significant** in Russia ($r = 0.238$, $p \approx 0$; ceteris paribus coefficient = 162.51 RUB/cm, $p < 0.001$). Taller individuals earn more, and this relationship survives the inclusion of gender, education, and geographic controls.
+
+2.  **The height premium is economically modest.** A 10 cm difference in height translates to a wage advantage of approximately 1,625 RUB/month — small compared to the \~11,000 RUB gender penalty or the \~10,000 RUB urbanization premium. A university degree (9,769 RUB) is worth approximately six times as much as an additional 10 cm of height.
+
+3.  **The height premium is strongly gendered.** The per-centimetre premium for men (416 RUB) is 3.5 times larger than for women (119 RUB). Physical stature appears to be a more important labour market signal for men than for women in Russia.
+
+## Residual Analysis
+
+```{r chapter6_hist, fig.cap="Fig. 6.1. Histogram of residuals from the simple OLS model"}
+residuals_data <- data.frame(res = resid(model_simple))
+
+ggplot(residuals_data, aes(x = res)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "white") +
+  scale_x_continuous(labels = label_number(big.mark = " ")) +
+  labs(title = "Histogram of Residuals",
+       x = "Residuals", y = "Frequency") +
+  theme_minimal()
+```
+
+```{r chapter6_qq, fig.cap="Fig. 6.2. Q-Q plot of residuals from the simple OLS model"}
+ggplot(residuals_data, aes(sample = res)) +
+  stat_qq(color = "steelblue", alpha = 0.5) +
+  stat_qq_line(color = "red", linewidth = 1) +
+  labs(title = "Q-Q Plot of Residuals",
+       x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  theme_minimal()
+```
+
+Visual analysis of both plots indicates a clear violation of the normality assumption:
+
+-   The **histogram** displays a strong right-skewed distribution of residuals. The bulk of residuals cluster near zero, but a long right tail extends far into positive territory.
+-   The **Q-Q plot** shows substantial departures from the theoretical line (shown in red), particularly on the right side. The model systematically underestimates the earnings of the highest-paid respondents, generating large positive residuals for the upper quantiles.
+
+Theoretically, non-normality of residuals distorts standard errors and renders p-value calculations incorrect. However, given the large sample size ($N \approx 5{,}000$), the Central Limit Theorem (CLT) ensures that OLS coefficient estimates remain unbiased and that p-values are asymptotically valid. We can therefore trust our inference about the direction and statistical significance of the height effect.
+
+The principal limitation this imposes is on predictive power: we can confidently draw conclusions about average trends across the population, but the model is unable to generate accurate income predictions for any specific individual.
+
+## Limitations
+
+1.  **Omitted variable bias.** Despite controlling for gender, education, and geography, the model omits important wage determinants such as occupation, industry, firm size, and cognitive ability. Some of these may be correlated with height, meaning the residual height coefficient (162.51 RUB) may still be biased.
+
+2.  **Self-reporting bias.** Both height and wages are self-reported, introducing measurement error that likely attenuates the estimated effect toward zero. The true height premium may be larger than our estimates suggest.
+
+3.  **Non-response bias.** The systematic under-representation of very high earners truncates the upper wage distribution. This may cause us to underestimate the magnitude of the height premium at the top of the income distribution, where physical appearance and perceived dominance may carry greater weight.
+
+4.  **Causality.** Our analysis identifies a statistical association, not a causal effect. It is possible that a third variable — such as socioeconomic background — simultaneously drives both height (through childhood nutrition) and wages (through access to better education and networks). In that case, height would not be a direct cause of higher earnings, but merely a correlated proxy. To establish causality, a natural experiment or instrumental variable approach would be required.
+
+5.  **Log-wage transformation.** Given the strong right skewness of wages, a semi-log specification ($\ln(\text{wage})$ as the dependent variable) would better satisfy regression assumptions and yield a percentage interpretation of the height premium. This extension is left for future work.
+
+**Overall conclusion.** Adding control variables reveals that the "height premium" in the Russian labor market is a secondary effect. Structural factors — gender and geographic location — and human capital (education) are far more powerful predictors of monthly wages. Nevertheless, the ceteris paribus height premium of \~162 RUB per centimeter is statistically significant and cannot be dismissed. Its practical economic significance, however, remains limited: a 10 cm difference in height translates to an expected wage difference of only \~1,620 RUB per month, compared to the \~11,000 RUB penalty associated with being female or living outside a regional center.
